@@ -65,8 +65,8 @@ fn main() {
         let formatted_code = rustfmt_code(&refactored_module);
         fs::write(&output_path, formatted_code).expect("Failed to write the refactored file");
 
-        // Create module import statement
-        let formatted_ident = format_ident(&sanitized_name);
+        // Create module import statement to bring both module and function into scope
+        let formatted_ident = format_use_ident(&sanitized_name);
         mod_imports.push(formatted_ident);
     }
 
@@ -122,10 +122,10 @@ fn rustfmt_code(code: &str) -> String {
     String::from_utf8(output.stdout).expect("Failed to convert rustfmt output to string")
 }
 
-// Function to create a valid Rust module declaration from a string
-fn format_ident(name: &str) -> String {
+// Function to create a valid Rust module declaration with use statement
+fn format_use_ident(name: &str) -> String {
     let sanitized_name = name.replace('-', "_").replace(' ', "_");
-    format!("pub mod {};", sanitized_name)
+    format!("pub use {}_mod::{};", sanitized_name, sanitized_name)
 }
 
 // Helper function to convert syn items to strings

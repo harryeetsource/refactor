@@ -49,30 +49,66 @@ fn main() {
         }
     }
 
-    // Step 3: Refactor logic into separate files based on dependencies and function calls
+    // Step 3: Group functions into modules based on subcrate dependencies
+    let mut grouped_functions: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for (func_name, func_code) in &functions {
+        // Determine which crate is used in the function and group accordingly
+        let group_name = if func_code.contains("windows::Win32::System::Threading") {
+            "threading"
+        } else if func_code.contains("windows::Win32::System::Diagnostics::Debug") {
+            "debug"
+        } else if func_code.contains("windows::Win32::System::Memory") {
+            "memory"
+        } else if func_code.contains("windows::Win32::System::Services") {
+            "services"
+        } else if func_code.contains("windows::Win32::System::ProcessStatus") {
+            "process_status"
+        } else if func_code.contains("windows::Win32::System::LibraryLoader") {
+            "library_loader"
+        } else if func_code.contains("windows::Win32::System::IO") {
+            "io"
+        } else if func_code.contains("windows::core") {
+            "core"
+        } else if func_code.contains("windows::Wdk::System::SystemServices") {
+            "wdk_system_services"
+        } else if func_code.contains("windows::Wdk::System::Memory") {
+            "wdk_memory"
+        } else if func_code.contains("windows::Wdk::Foundation") {
+            "wdk_foundation"
+        } else if func_code.contains("aes::cipher") || func_code.contains("pcbc") {
+            "cryptography"
+        } else if func_code.contains("serde") || func_code.contains("serde_json") {
+            "serialization"
+        } else {
+            "general"
+        };
+
+        grouped_functions.entry(group_name.to_string()).or_default().push((func_name.clone(), func_code.clone()));
+    }
+
     let mut mod_declarations = Vec::new();
     let mut use_statements = Vec::new();
 
-    for (func_name, func_code) in &functions {
-        // Generate a valid module name from the function name
-        let sanitized_name = func_name.replace('-', "_").replace(' ', "_");
+    // Step 4: Refactor logic into separate files based on grouped functions
+    for (group_name, funcs) in &grouped_functions {
+        let module_name = format!("{}_mod", group_name);
+        let mut module_code = String::from("use crate::*;\n\n");
 
-        // Generate a new module file for each function with the `use crate::*;` import
-        let refactored_module = format!(
-            "use crate::*;\n\n{}",
-            func_code
-        );
+        for (func_name, func_code) in funcs {
+            module_code.push_str(func_code);
+            module_code.push_str("\n\n");
+        }
 
-        let output_path: PathBuf = output_dir.join(format!("{}_mod.rs", sanitized_name));
-        let formatted_code = rustfmt_code(&refactored_module);
+        let output_path: PathBuf = output_dir.join(format!("{}.rs", module_name));
+        let formatted_code = rustfmt_code(&module_code);
         fs::write(&output_path, formatted_code).expect("Failed to write the refactored file");
 
         // Create module declaration and use statement
-        mod_declarations.push(format!("mod {}_mod;", sanitized_name));
-        use_statements.push(format!("pub use {}_mod::{};", sanitized_name, sanitized_name));
+        mod_declarations.push(format!("mod {};", module_name));
+        use_statements.push(format!("pub use {}::*;", module_name));
     }
 
-    // Step 4: Extract the main function and create a tmp_main.rs file with all module imports and other items
+    // Step 5: Extract the main function and create a tmp_main.rs file with all module imports and other items
     if let Some(main_func) = main_function {
         let mut tmp_main = String::new();
         

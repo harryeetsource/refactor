@@ -77,23 +77,24 @@ fn main() {
         // Include all imports
         for import in &crate_usages {
             tmp_main.push_str(import);
-            tmp_main.push('\n');
+            tmp_main.push_str("\n\n");
         }
 
         // Include all other items (constants, types, etc.)
         for item in &other_items {
             tmp_main.push_str(item);
-            tmp_main.push('\n');
+            tmp_main.push_str("\n\n");
         }
 
         // Include all function module imports
         for module_import in &mod_imports {
             tmp_main.push_str(module_import);
-            tmp_main.push('\n');
+            tmp_main.push_str("\n\n");
         }
 
         // Include the main function
         tmp_main.push_str(&main_func);
+        tmp_main.push_str("\n\n");
 
         let formatted_main_code = rustfmt_code(&tmp_main);
 

@@ -1,24 +1,24 @@
 use std::fs;
-use syn::{File, Item, visit::Visit};
+use syn::{File, Item, visit::Visit, UseTree};
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::env;
 use std::process::Command;
 use std::collections::HashSet;
 use syn::visit::visit_item_fn;
-use syn::ExprPath;
+use syn::{ExprPath, ItemFn};
 
 struct CrateUsageVisitor<'a> {
-    crate_usages: &'a HashMap<String, String>,
+    imported_functions: &'a HashMap<String, String>,
     used_crates: HashSet<String>,
 }
 
 impl<'a> Visit<'_> for CrateUsageVisitor<'a> {
     fn visit_expr_path(&mut self, node: &ExprPath) {
         if let Some(segment) = node.path.segments.first() {
-            let crate_name = segment.ident.to_string();
-            if self.crate_usages.contains_key(&crate_name) {
-                self.used_crates.insert(crate_name);
+            let func_name = segment.ident.to_string();
+            if let Some(crate_name) = self.imported_functions.get(&func_name) {
+                self.used_crates.insert(crate_name.clone());
             }
         }
         syn::visit::visit_expr_path(self, node);
@@ -42,7 +42,7 @@ fn main() {
     let syntax_tree: File = syn::parse_file(&content).expect("Unable to parse file");
 
     // Step 2: Analyze the AST and group logic based on dependencies and control flow
-    let mut crate_usages = HashMap::new();
+    let mut imported_functions = HashMap::new();
     let mut functions = HashMap::new();
     let mut main_function = None;
     let mut other_items = Vec::new(); // Collect other items like constants, types, etc.
@@ -50,11 +50,10 @@ fn main() {
     for item in &syntax_tree.items {
         match item {
             Item::Use(use_item) => {
-                // Collect crate usage for analysis
-                let use_str = item_to_string(use_item);
-                if let Some(crate_name) = use_str.split_whitespace().nth(1) {
-                    let crate_name = crate_name.split("::").next().unwrap_or("general").to_string();
-                    crate_usages.insert(crate_name.clone(), use_str.clone());
+                // Collect crate usage and the functions imported from each crate
+                if let UseTree::Path(use_path) = &use_item.tree {
+                    let crate_name = use_path.ident.to_string();
+                    imported_functions.insert(crate_name.clone(), item_to_string(use_item));
                 }
             }
             Item::Fn(func) => {
@@ -63,7 +62,7 @@ fn main() {
                 if func_name == "main" {
                     main_function = Some(item_to_string(func));
                 } else {
-                    functions.insert(func_name.clone(), func.clone());
+                    functions.insert(func_name.clone(), item_to_string(func));
                 }
             }
             _ => {
@@ -75,22 +74,34 @@ fn main() {
 
     // Step 3: Group functions into modules based on subcrate dependencies
     let mut grouped_functions: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut group_imports: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut group_counter = 1;
 
-    for (func_name, func) in &functions {
+    for (func_name, func_code) in &functions {
         let mut visitor = CrateUsageVisitor {
-            crate_usages: &crate_usages,
+            imported_functions: &imported_functions,
             used_crates: HashSet::new(),
         };
-        visit_item_fn(&mut visitor, func);
+        let func_ast: ItemFn = syn::parse_str(func_code).expect("Unable to parse function AST");
+        visit_item_fn(&mut visitor, &func_ast);
 
         let used_crates = visitor.used_crates;
         let group_name = if !used_crates.is_empty() {
-            used_crates.into_iter().collect::<Vec<_>>().join("_")
+            format!("group_{}", group_counter)
         } else {
             "general".to_string()
         };
 
-        grouped_functions.entry(group_name.clone()).or_default().push((func_name.clone(), item_to_string(func)));
+        if used_crates.is_empty() {
+            grouped_functions.entry(group_name.clone()).or_default().push((func_name.clone(), func_code.clone()));
+            group_imports.entry(group_name.clone()).or_default().extend(used_crates);
+        } else {
+            if !grouped_functions.contains_key(&group_name) {
+                group_counter += 1;
+            }
+            grouped_functions.entry(group_name.clone()).or_default().push((func_name.clone(), func_code.clone()));
+            group_imports.entry(group_name.clone()).or_default().extend(used_crates);
+        }
     }
 
     let mut mod_declarations = Vec::new();
@@ -103,9 +114,26 @@ fn main() {
             continue;
         }
         
-        let module_name = format!("{}_mod", group_name);
-        let mut module_code = String::from("use crate::*;\n\n");
+        // Sanitize the module name to remove invalid characters
+        let sanitized_group_name = sanitize_filename(group_name);
+        let module_name = format!("{}_mod", sanitized_group_name);
+        let mut module_code = String::new();
 
+        // Add `use crate::*;` to import everything from the main file
+        module_code.push_str("use crate::*;\n\n");
+
+        // Include relevant imports for this module
+        if let Some(imports) = group_imports.get(group_name) {
+            for import in imports {
+                if let Some(import_code) = imported_functions.get(import) {
+                    module_code.push_str(import_code);
+                    module_code.push_str("\n");
+                }
+            }
+        }
+        module_code.push_str("\n");
+
+        // Add the functions to the module
         for (_func_name, func_code) in funcs {
             module_code.push_str(func_code);
             module_code.push_str("\n\n");
@@ -113,10 +141,10 @@ fn main() {
 
         let output_path: PathBuf = output_dir.join(format!("{}.rs", module_name));
         let formatted_code = rustfmt_code(&module_code);
-        fs::write(&output_path, formatted_code).expect("Failed to write the refactored file");
+        fs::write(&output_path, formatted_code).unwrap_or_else(|e| panic!("Failed to write the refactored file: {:?} with error: {}", output_path, e));
 
         // Create module declaration and use statement
-        mod_declarations.push(format!("mod {};", module_name));
+        mod_declarations.push(format!("pub mod {};", module_name));
         use_statements.push(format!("pub use {}::*;", module_name));
     }
 
@@ -124,8 +152,8 @@ fn main() {
     if let Some(main_func) = main_function {
         let mut tmp_main = String::new();
         
-        // Include all imports
-        for import in crate_usages.values() {
+        // Include all imports not associated with any function group
+        for import in imported_functions.values() {
             tmp_main.push_str(import);
             tmp_main.push_str("\n\n");
         }
@@ -181,4 +209,9 @@ fn rustfmt_code(code: &str) -> String {
 // Helper function to convert syn items to strings
 fn item_to_string<T: quote::ToTokens>(item: &T) -> String {
     item.to_token_stream().to_string()
+}
+
+// Function to sanitize a filename by removing invalid characters
+fn sanitize_filename(filename: &str) -> String {
+    filename.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect()
 }

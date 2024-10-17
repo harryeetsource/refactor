@@ -1,9 +1,29 @@
 use std::fs;
-use syn::{File, Item};
+use syn::{File, Item, visit::Visit};
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::env;
 use std::process::Command;
+use std::collections::HashSet;
+use syn::visit::visit_item_fn;
+use syn::ExprPath;
+
+struct CrateUsageVisitor<'a> {
+    crate_usages: &'a HashMap<String, String>,
+    used_crates: HashSet<String>,
+}
+
+impl<'a> Visit<'_> for CrateUsageVisitor<'a> {
+    fn visit_expr_path(&mut self, node: &ExprPath) {
+        if let Some(segment) = node.path.segments.first() {
+            let crate_name = segment.ident.to_string();
+            if self.crate_usages.contains_key(&crate_name) {
+                self.used_crates.insert(crate_name);
+            }
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+}
 
 fn main() {
     // Get command line arguments for input file
@@ -22,7 +42,7 @@ fn main() {
     let syntax_tree: File = syn::parse_file(&content).expect("Unable to parse file");
 
     // Step 2: Analyze the AST and group logic based on dependencies and control flow
-    let mut crate_usages = Vec::new();
+    let mut crate_usages = HashMap::new();
     let mut functions = HashMap::new();
     let mut main_function = None;
     let mut other_items = Vec::new(); // Collect other items like constants, types, etc.
@@ -31,7 +51,11 @@ fn main() {
         match item {
             Item::Use(use_item) => {
                 // Collect crate usage for analysis
-                crate_usages.push(item_to_string(use_item));
+                let use_str = item_to_string(use_item);
+                if let Some(crate_name) = use_str.split_whitespace().nth(1) {
+                    let crate_name = crate_name.split("::").next().unwrap_or("general").to_string();
+                    crate_usages.insert(crate_name.clone(), use_str.clone());
+                }
             }
             Item::Fn(func) => {
                 // Collect functions to group them later by name
@@ -39,7 +63,7 @@ fn main() {
                 if func_name == "main" {
                     main_function = Some(item_to_string(func));
                 } else {
-                    functions.insert(func_name.clone(), item_to_string(func));
+                    functions.insert(func_name.clone(), func.clone());
                 }
             }
             _ => {
@@ -51,39 +75,22 @@ fn main() {
 
     // Step 3: Group functions into modules based on subcrate dependencies
     let mut grouped_functions: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    for (func_name, func_code) in &functions {
-        // Determine which crate is used in the function and group accordingly
-        let group_name = if func_code.contains("windows::Win32::System::Threading") {
-            "threading"
-        } else if func_code.contains("windows::Win32::System::Diagnostics::Debug") {
-            "debug"
-        } else if func_code.contains("windows::Win32::System::Memory") {
-            "memory"
-        } else if func_code.contains("windows::Win32::System::Services") {
-            "services"
-        } else if func_code.contains("windows::Win32::System::ProcessStatus") {
-            "process_status"
-        } else if func_code.contains("windows::Win32::System::LibraryLoader") {
-            "library_loader"
-        } else if func_code.contains("windows::Win32::System::IO") {
-            "io"
-        } else if func_code.contains("windows::core") {
-            "core"
-        } else if func_code.contains("windows::Wdk::System::SystemServices") {
-            "wdk_system_services"
-        } else if func_code.contains("windows::Wdk::System::Memory") {
-            "wdk_memory"
-        } else if func_code.contains("windows::Wdk::Foundation") {
-            "wdk_foundation"
-        } else if func_code.contains("aes::cipher") || func_code.contains("pcbc") {
-            "cryptography"
-        } else if func_code.contains("serde") || func_code.contains("serde_json") {
-            "serialization"
+
+    for (func_name, func) in &functions {
+        let mut visitor = CrateUsageVisitor {
+            crate_usages: &crate_usages,
+            used_crates: HashSet::new(),
+        };
+        visit_item_fn(&mut visitor, func);
+
+        let used_crates = visitor.used_crates;
+        let group_name = if !used_crates.is_empty() {
+            used_crates.into_iter().collect::<Vec<_>>().join("_")
         } else {
-            "general"
+            "general".to_string()
         };
 
-        grouped_functions.entry(group_name.to_string()).or_default().push((func_name.clone(), func_code.clone()));
+        grouped_functions.entry(group_name.clone()).or_default().push((func_name.clone(), item_to_string(func)));
     }
 
     let mut mod_declarations = Vec::new();
@@ -91,10 +98,15 @@ fn main() {
 
     // Step 4: Refactor logic into separate files based on grouped functions
     for (group_name, funcs) in &grouped_functions {
+        if group_name == "general" && funcs.len() == functions.len() {
+            // Skip creating a general_mod if all functions are grouped as general
+            continue;
+        }
+        
         let module_name = format!("{}_mod", group_name);
         let mut module_code = String::from("use crate::*;\n\n");
 
-        for (func_name, func_code) in funcs {
+        for (_func_name, func_code) in funcs {
             module_code.push_str(func_code);
             module_code.push_str("\n\n");
         }
@@ -113,7 +125,7 @@ fn main() {
         let mut tmp_main = String::new();
         
         // Include all imports
-        for import in &crate_usages {
+        for import in crate_usages.values() {
             tmp_main.push_str(import);
             tmp_main.push_str("\n\n");
         }

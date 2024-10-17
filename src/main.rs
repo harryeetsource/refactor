@@ -50,7 +50,9 @@ fn main() {
     }
 
     // Step 3: Refactor logic into separate files based on dependencies and function calls
-    let mut mod_imports = Vec::new();
+    let mut mod_declarations = Vec::new();
+    let mut use_statements = Vec::new();
+
     for (func_name, func_code) in &functions {
         // Generate a valid module name from the function name
         let sanitized_name = func_name.replace('-', "_").replace(' ', "_");
@@ -65,9 +67,9 @@ fn main() {
         let formatted_code = rustfmt_code(&refactored_module);
         fs::write(&output_path, formatted_code).expect("Failed to write the refactored file");
 
-        // Create module import statement to bring both module and function into scope
-        let formatted_ident = format_use_ident(&sanitized_name);
-        mod_imports.push(formatted_ident);
+        // Create module declaration and use statement
+        mod_declarations.push(format!("mod {}_mod;", sanitized_name));
+        use_statements.push(format!("pub use {}_mod::{};", sanitized_name, sanitized_name));
     }
 
     // Step 4: Extract the main function and create a tmp_main.rs file with all module imports and other items
@@ -86,9 +88,15 @@ fn main() {
             tmp_main.push_str("\n\n");
         }
 
-        // Include all function module imports
-        for module_import in &mod_imports {
-            tmp_main.push_str(module_import);
+        // Include all function module declarations
+        for mod_decl in &mod_declarations {
+            tmp_main.push_str(mod_decl);
+            tmp_main.push_str("\n\n");
+        }
+        
+        // Include all function public use imports
+        for use_statement in &use_statements {
+            tmp_main.push_str(use_statement);
             tmp_main.push_str("\n\n");
         }
 
@@ -120,12 +128,6 @@ fn rustfmt_code(code: &str) -> String {
 
     let output = child.wait_with_output().expect("Failed to read rustfmt output");
     String::from_utf8(output.stdout).expect("Failed to convert rustfmt output to string")
-}
-
-// Function to create a valid Rust module declaration with use statement
-fn format_use_ident(name: &str) -> String {
-    let sanitized_name = name.replace('-', "_").replace(' ', "_");
-    format!("pub use {}_mod::{};", sanitized_name, sanitized_name)
 }
 
 // Helper function to convert syn items to strings

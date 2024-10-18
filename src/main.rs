@@ -72,36 +72,52 @@ fn main() {
         }
     }
 
-    // Step 3: Group functions into modules based on subcrate dependencies
+    // Step 3: Group functions into modules based on functionality keywords
     let mut grouped_functions: HashMap<String, Vec<(String, String)>> = HashMap::new();
     let mut group_imports: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut group_counter = 1;
+
+    // Define categories based on function name keywords and crate usage
+    let categories = vec![
+        ("network", vec!["connect", "send", "receive", "http", "socket"]),
+        ("file_io", vec!["read", "write", "file", "open", "close"]),
+        ("crypto", vec!["encrypt", "decrypt", "hash", "key"]),
+        ("util", vec!["helper", "utility", "convert", "parse"]),
+        ("windows_system", vec!["windows", "handle", "service", "process", "thread"]),
+        ("core_std", vec!["core", "std", "sync", "mutex", "ptr"]),
+        ("serde", vec!["serde", "json", "deserialize"]),
+        ("rand", vec!["rand", "rng"]),
+        ("memory", vec!["mem", "memory", "alloc", "ptr"]),
+        // Add more categories as needed
+    ];
 
     for (func_name, func_code) in &functions {
+        let mut assigned_category = "general".to_string();
+
+        // Assign the function to a category based on keywords or crate usage
+        for (category, keywords) in &categories {
+            if keywords.iter().any(|keyword| func_name.contains(keyword)) {
+                assigned_category = category.to_string();
+                break;
+            }
+        }
+
+        // Group functions by their assigned category
+        grouped_functions
+            .entry(assigned_category.clone())
+            .or_default()
+            .push((func_name.clone(), func_code.clone()));
+
+        // Determine imports required by the category
         let mut visitor = CrateUsageVisitor {
             imported_functions: &imported_functions,
             used_crates: HashSet::new(),
         };
         let func_ast: ItemFn = syn::parse_str(func_code).expect("Unable to parse function AST");
         visit_item_fn(&mut visitor, &func_ast);
-
-        let used_crates = visitor.used_crates;
-        let group_name = if !used_crates.is_empty() {
-            format!("group_{}", group_counter)
-        } else {
-            "general".to_string()
-        };
-
-        if used_crates.is_empty() {
-            grouped_functions.entry(group_name.clone()).or_default().push((func_name.clone(), func_code.clone()));
-            group_imports.entry(group_name.clone()).or_default().extend(used_crates);
-        } else {
-            if !grouped_functions.contains_key(&group_name) {
-                group_counter += 1;
-            }
-            grouped_functions.entry(group_name.clone()).or_default().push((func_name.clone(), func_code.clone()));
-            group_imports.entry(group_name.clone()).or_default().extend(used_crates);
-        }
+        group_imports
+            .entry(assigned_category.clone())
+            .or_default()
+            .extend(visitor.used_crates);
     }
 
     let mut mod_declarations = Vec::new();
